@@ -404,7 +404,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	private fun processPacket(received: DatagramPacket, packet: UDPPacket, connection: UDPDevice?) {
 		val tracker: Tracker?
 		when (packet) {
-			is UDPPacket0Heartbeat, is UDPPacket1Heartbeat, is UDPPacket25SetConfigFlag -> {}
+			is UDPPacket5RequestTrackerData, is UDPPacket0Heartbeat, is UDPPacket1Heartbeat, is UDPPacket25SetConfigFlag -> {}
 
 			is UDPPacket3Handshake -> setUpNewConnection(received, packet)
 
