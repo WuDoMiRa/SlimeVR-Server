@@ -83,6 +83,7 @@ sealed interface RotationPacket : SensorSpecificPacket {
 
 data object UDPPacket0Heartbeat : UDPPacket(0)
 data object UDPPacket1Heartbeat : UDPPacket(1)
+data object UDPPacket5RequestTrackerData : UDPPacket(5) // as per implementation-based req
 data class UDPPacket1Rotation(override var rotation: Quaternion = Quaternion.IDENTITY) :
 	UDPPacket(1),
 	RotationPacket {
@@ -162,6 +163,7 @@ data class UDPPacket4Acceleration(var acceleration: Vector3 = Vector3.NULL) :
 		}
 	}
 }
+
 
 data class UDPPacket10PingPong(var pingId: Int = 0) : UDPPacket(10) {
 	override fun readData(buf: ByteBuffer) {

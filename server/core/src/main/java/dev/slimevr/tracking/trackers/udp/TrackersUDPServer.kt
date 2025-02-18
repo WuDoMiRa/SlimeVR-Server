@@ -320,6 +320,29 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						e,
 					)
 				}
+				// Iterate through trackers and send a packet to update. This code could be moved upwards though...
+				// Why is this made in kotlin?
+				// And why am I getting errors in this file just by installing an extension for Kotlin code :sob:
+				synchronized(connections) {
+					for (conn in connections) {
+						bb.limit(bb.capacity())
+						bb.rewind()
+						parser.write(bb, conn, UDPPacket5RequestTrackerData)
+						socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
+
+						// Let's have a maximum and minimum value of 10 milliseconds before continuing!
+						Thread.sleep(10)
+
+						// This design approach also has a caveat that at the very end of the list of trackers:
+						// it will wait 10 ms before going back to the first tracker, but this can just add an extra 10 ms in total, so
+						// for 10 trackers, 10 ms of delay, 100 ms total for all trackers to assume have sent their data, add an extra 10 because of this approach,
+						// and you get 110 ms for 10 trackers.
+
+						// This makes a queue-like system, although it's not inherently waiting for it to 'finish' literally, but it is waiting a 
+						// predefined maximum and minimum amount of time before moving on.
+					}
+				}
+				// We request tracker data BEFORE timing out/pinging so that it provides at least consistent data.
 				if (lastKeepup + 500 < System.currentTimeMillis()) {
 					lastKeepup = System.currentTimeMillis()
 					synchronized(connections) {
