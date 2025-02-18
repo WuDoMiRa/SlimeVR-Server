@@ -281,7 +281,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		try {
 			socket = DatagramSocket(port)
 			var prevPacketTime = System.currentTimeMillis()
-			socket.soTimeout = 25
+			socket.soTimeout = 250
 			while (true) {
 				var received: DatagramPacket? = null
 				try {
