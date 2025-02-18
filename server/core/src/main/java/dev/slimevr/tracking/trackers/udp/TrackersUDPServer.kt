@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.function.Consumer
 import kotlin.collections.HashMap
 import kotlin.coroutines.resume
+import java.util.concurrent.locks.LockSupport
 
 /**
  * Receives trackers data by UDP using extended owoTrack protocol.
@@ -272,10 +273,15 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 	override fun run() {
 		val serialBuffer2 = StringBuilder()
+		var CycleStart = System.nanoTime()
+		val CycleDelay = 10_000_000 // This controls the delay between requesting data for each tracker.
+		var DelayBetweenCycleStart = System.nanoTime()
+		val DelayBetweenCycles=200_000_000 // This controls the delay between cycles itself. I.e if we already finished a cycle,
+		// wait until this time has passed to do another cycle.
 		try {
 			socket = DatagramSocket(port)
 			var prevPacketTime = System.currentTimeMillis()
-			socket.soTimeout = 250
+			socket.soTimeout = 25
 			while (true) {
 				var received: DatagramPacket? = null
 				try {
@@ -323,6 +329,12 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				// Iterate through trackers and send a packet to update. This code could be moved upwards though...
 				// Why is this made in kotlin?
 				// And why am I getting errors in this file just by installing an extension for Kotlin code :sob:
+				//val CycleDelayElapsed = System.nanoTime() - DelayBetweenCycleStart
+				//if (CycleDelayElapsed < DelayBetweenCycles) {
+				//	LockSupport.parkNanos(DelayBetweenCycles - CycleDelayElapsed)
+				//	DelayBetweenCycleStart=System.nanoTime()
+					
+				//}
 				synchronized(connections) {
 					for (conn in connections) {
 						bb.limit(bb.capacity())
@@ -331,7 +343,13 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
 
 						// Let's have a maximum and minimum value of 10 milliseconds before continuing!
-						Thread.sleep(10)
+						//Thread.sleep(0.10) // Hold on... are waiting seconds instead of milliseconds?
+						// ... your code ...
+						val elapsed = System.nanoTime() - CycleStart
+						if (elapsed < CycleDelay) {
+    						LockSupport.parkNanos(CycleDelay - elapsed)
+							CycleStart=System.nanoTime()
+						}
 
 						// This design approach also has a caveat that at the very end of the list of trackers:
 						// it will wait 10 ms before going back to the first tracker, but this can just add an extra 10 ms in total, so
@@ -343,7 +361,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 					}
 				}
 				// We request tracker data BEFORE timing out/pinging so that it provides at least consistent data.
-				if (lastKeepup + 500 < System.currentTimeMillis()) {
+				if (lastKeepup + 1500 < System.currentTimeMillis()) { // This was originally 500, i increasd it to 1500 to further decrease requests per second.
 					lastKeepup = System.currentTimeMillis()
 					synchronized(connections) {
 						for (conn in connections) {
