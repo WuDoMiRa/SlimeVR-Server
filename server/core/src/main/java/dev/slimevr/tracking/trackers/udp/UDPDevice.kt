@@ -15,6 +15,19 @@ class UDPDevice(
 	override val boardType: BoardType = BoardType.UNKNOWN,
 	override val mcuType: MCUType = MCUType.UNKNOWN,
 ) : Device(true) {
+	// TFRC State
+    var rtt: Double = 100.0 // Smoothed RTT in ms
+    var lossRate: Double = 0.0 // Packet loss ratio (0-1)
+    var lastRateUpdate: Long = System.currentTimeMillis()
+    var currentRate: Double = 50.0 // Packets/sec
+    val sentPackets = ConcurrentHashMap<Long, Long>() // SequenceNumber -> SendTime
+    var sequenceNumber: Long = 0
+	var lossIntervals: ArrayDeque<Double> = ArrayDeque()
+	var lastLossTime: Double = 0.0
+	var firstLoss: Boolean = true
+	var packetSize: Int = 120 // Average UDP payload size
+	var lastSendTime: Long = System.currentTimeMillis()
+	
 
 	override val id: Int = nextLocalDeviceId.incrementAndGet()
 

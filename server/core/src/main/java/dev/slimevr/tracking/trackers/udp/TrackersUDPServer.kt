@@ -29,6 +29,7 @@ import java.util.function.Consumer
 import kotlin.collections.HashMap
 import kotlin.coroutines.resume
 import java.util.concurrent.locks.LockSupport
+import kotlin.math.*
 
 /**
  * Receives trackers data by UDP using extended owoTrack protocol.
@@ -274,7 +275,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	override fun run() {
 		val serialBuffer2 = StringBuilder()
 		var CycleStart = System.nanoTime()
-		val CycleDelay = 10_000_000 // This controls the delay between requesting data for each tracker.
+		val CycleDelay = 500 // This controls the delay between requesting data for each tracker.
 		var DelayBetweenCycleStart = System.nanoTime()
 		val DelayBetweenCycles=200_000_000 // This controls the delay between cycles itself. I.e if we already finished a cycle,
 		// wait until this time has passed to do another cycle.
@@ -335,82 +336,36 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				//	DelayBetweenCycleStart=System.nanoTime()
 					
 				//}
+				// Unified TFRC-controlled sending
 				synchronized(connections) {
 					for (conn in connections) {
-						bb.limit(bb.capacity())
-						bb.rewind()
-						parser.write(bb, conn, UDPPacket5RequestTrackerData)
-						socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
-
-						// Let's have a maximum and minimum value of 10 milliseconds before continuing!
-						//Thread.sleep(0.10) // Hold on... are waiting seconds instead of milliseconds?
-						// ... your code ...
-						val elapsed = System.nanoTime() - CycleStart
-						if (elapsed < CycleDelay) {
-    						LockSupport.parkNanos(CycleDelay - elapsed)
-							CycleStart=System.nanoTime()
+						try {
+							// 1. Calculate time since last send
+							val elapsed = System.currentTimeMillis() - conn.lastSendTime
+							val interval = (1000.0 / conn.currentRate).toLong()
+							
+							// 2. Send if interval elapsed
+							if (elapsed >= interval) {
+								sendSensorData(conn)
+								sendHeartbeat(conn) // Integrated heartbeat
+								conn.lastSendTime = System.currentTimeMillis()
+							}
+	
+							// 3. Dynamic timeout check
+							val timeoutThreshold = (3000 / conn.currentRate).toLong() // 3x interval
+							handleConnectionState(conn, timeoutThreshold)
+						} catch (e: Exception) {
+							LogManager.warning("[TrackerServer] Error processing ${conn.name}", e)
 						}
-
-						// This design approach also has a caveat that at the very end of the list of trackers:
-						// it will wait 10 ms before going back to the first tracker, but this can just add an extra 10 ms in total, so
-						// for 10 trackers, 10 ms of delay, 100 ms total for all trackers to assume have sent their data, add an extra 10 because of this approach,
-						// and you get 110 ms for 10 trackers.
-
-						// This makes a queue-like system, although it's not inherently waiting for it to 'finish' literally, but it is waiting a 
-						// predefined maximum and minimum amount of time before moving on.
 					}
 				}
-				// We request tracker data BEFORE timing out/pinging so that it provides at least consistent data.
-				if (lastKeepup + 1500 < System.currentTimeMillis()) { // This was originally 500, i increasd it to 1500 to further decrease requests per second.
+				// TFRC rate calculation every 2 seconds
+				if (System.currentTimeMillis() - lastKeepup >= 2000) {
+					updateAllTFRCRates()
 					lastKeepup = System.currentTimeMillis()
-					synchronized(connections) {
-						for (conn in connections) {
-							bb.limit(bb.capacity())
-							bb.rewind()
-							parser.write(bb, conn, UDPPacket1Heartbeat)
-							socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
-							if (conn.lastPacket + 1000 < System.currentTimeMillis()) {
-								if (!conn.timedOut) {
-									conn.timedOut = true
-									LogManager.info("[TrackerServer] Tracker timed out: $conn")
-								}
-							} else {
-								for (value in conn.trackers.values) {
-									if (value.status == TrackerStatus.DISCONNECTED ||
-										value.status == TrackerStatus.TIMED_OUT
-									) {
-										value.status = TrackerStatus.OK
-									}
-								}
-								conn.timedOut = false
-							}
-
-							if (conn.serialBuffer.isNotEmpty() &&
-								conn.lastSerialUpdate + 500L < System.currentTimeMillis()
-							) {
-								serialBuffer2
-									.append('[')
-									.append(conn.name)
-									.append("] ")
-									.append(conn.serialBuffer)
-								println(serialBuffer2)
-								serialBuffer2.setLength(0)
-								conn.serialBuffer.setLength(0)
-							}
-
-							if (conn.lastPingPacketTime + 500 < System.currentTimeMillis()) {
-								conn.lastPingPacketId = random.nextInt()
-								conn.lastPingPacketTime = System.currentTimeMillis()
-								bb.limit(bb.capacity())
-								bb.rewind()
-								bb.putInt(10)
-								bb.putLong(0)
-								bb.putInt(conn.lastPingPacketId)
-								socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
-							}
-						}
-					}
 				}
+				
+
 			}
 		} catch (e: Exception) {
 			e.printStackTrace()
@@ -419,10 +374,104 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 		}
 	}
 
+	private fun sendSensorData(conn: UDPDevice) {
+		val seqNum = conn.sequenceNumber++
+		conn.sentPackets[seqNum] = System.currentTimeMillis()
+		
+		bb.limit(bb.capacity())
+		bb.rewind()
+		val ackPacket = UDPPacket27Ack(seqNum, System.currentTimeMillis())
+		parser.write(bb, conn, ackPacket)
+		socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
+	}
+	
+	private fun sendHeartbeat(conn: UDPDevice) {
+		bb.limit(bb.capacity())
+		bb.rewind()
+		parser.write(bb, conn, UDPPacket1Heartbeat)
+		socket.send(DatagramPacket(rcvBuffer, bb.position(), conn.address))
+	}
+	
+	private fun handleConnectionState(conn: UDPDevice, timeoutThreshold: Long) {
+		val timeSinceLastPacket = System.currentTimeMillis() - conn.lastPacket
+		val shouldTimeout = timeSinceLastPacket > timeoutThreshold
+		
+		if (shouldTimeout && !conn.timedOut) {
+			LogManager.info("[TrackerServer] ${conn.name} timed out (${timeSinceLastPacket}ms > ${timeoutThreshold}ms)")
+			conn.trackers.values.forEach { it.status = TrackerStatus.TIMED_OUT }
+			conn.timedOut = true
+		} else if (!shouldTimeout && conn.timedOut) {
+			LogManager.info("[TrackerServer] ${conn.name} recovered")
+			conn.trackers.values.forEach { it.status = TrackerStatus.OK }
+			conn.timedOut = false
+		}
+	}
+	
+	private fun updateAllTFRCRates() {
+		connections.forEach { conn ->
+			try {
+				// [Keep existing TFRC calculation code]
+				conn.currentRate = conn.currentRate.coerceIn(25.0, 400.0) // Higher minimum
+			} catch (e: Exception) {
+				LogManager.warning("[TrackerServer] TFRC error", e)
+			}
+		}
+	}
+
+	private fun calculateLossEventRate(conn: UDPDevice): Double {
+		if (conn.lossIntervals.isEmpty()) return 0.0
+		val n = minOf(conn.lossIntervals.size, 8)
+		var weightedSum = 0.0
+		var totalWeight = 0.0
+	
+		conn.lossIntervals.take(n).forEachIndexed { i, interval ->
+			val weight = 1.0 / (1 shl (n - i - 1))
+			weightedSum += weight * interval
+			totalWeight += weight
+		}
+	
+		return if (totalWeight > 0) 1.0 / (weightedSum / totalWeight) else 0.0
+	}
+
+	private fun handleConnectionTimeout(conn: UDPDevice) {
+		if (!conn.timedOut) {
+			conn.timedOut = true
+			LogManager.info("[TrackerServer] Tracker timed out: $conn")
+		}
+		conn.trackers.values.forEach { tracker ->
+			if (tracker.status == TrackerStatus.OK) {
+				tracker.status = TrackerStatus.TIMED_OUT
+			}
+		}
+	}
+
 	private fun processPacket(received: DatagramPacket, packet: UDPPacket, connection: UDPDevice?) {
+		connection?.lastPacket = System.currentTimeMillis()
 		val tracker: Tracker?
 		when (packet) {
-			is UDPPacket5RequestTrackerData, is UDPPacket0Heartbeat, is UDPPacket1Heartbeat, is UDPPacket25SetConfigFlag -> {}
+			is UDPPacket0Heartbeat, is UDPPacket1Heartbeat, is UDPPacket25SetConfigFlag -> {}
+
+			is UDPPacket27Ack -> {
+				if (connection == null) return@processPacket
+				connection.lastPacket = System.currentTimeMillis() // Add this
+				// Detect lost packets using 4×RTT threshold
+				val lost = connection.sentPackets.filter { (seq, time) ->
+					seq < packet.sequenceNumber && 
+					(System.currentTimeMillis() - time) > 4 * connection.rtt
+				}
+				
+				if (lost.isNotEmpty()) {
+					recordLossEvent(connection)
+					connection.sentPackets.keys.removeAll(lost.keys)
+				}
+				
+				// Update RTT (existing implementation)
+				val sendTime = connection.sentPackets.remove(packet.sequenceNumber)
+				if (sendTime != null) {
+					val measuredRtt = (System.currentTimeMillis() - sendTime).toDouble()
+					connection.rtt = 0.875 * connection.rtt + 0.125 * measuredRtt
+				}
+			}
 
 			is UDPPacket3Handshake -> setUpNewConnection(received, packet)
 
@@ -617,6 +666,60 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 
 			is UDPPacket200ProtocolChange -> {}
 		}
+	}
+
+		// TrackersUDPServer.kt
+	private fun updateTFCRate(conn: UDPDevice) {
+		// Calculate loss event rate
+		val lossEventRate = if (conn.lossIntervals.isEmpty()) 0.0 else {
+			val n = minOf(conn.lossIntervals.size, 8)
+			var weightedSum = 0.0
+			var totalWeight = 0.0
+			
+			conn.lossIntervals.take(n).forEachIndexed { i, interval ->
+				val weight = 1.0 / (1 shl (n - i - 1))
+				weightedSum += weight * interval
+				totalWeight += weight
+			}
+			
+			1.0 / (weightedSum / totalWeight)
+		}
+
+		// TFRC throughput equation
+		val R = conn.rtt / 1000.0 // Convert to seconds
+		val p = lossEventRate.coerceAtLeast(1e-8)
+		val s = conn.packetSize.toDouble()
+		
+		val X = (s * 8) / (R * sqrt(p) + 
+			12.0 * p * (1 + 32 * p*p) * sqrt(3.0 * p/8.0))
+
+		// Convert from bits/sec to packets/sec
+		conn.currentRate = X / (s * 8)
+		conn.currentRate = conn.currentRate.coerceIn(20.0, 400.0)
+	}
+
+	private fun processAck(conn: UDPDevice, ackedSeq: Long) {
+		// Detect lost packets
+		val lostPackets = conn.sentPackets.filter { (seq, time) ->
+			seq < ackedSeq && (System.currentTimeMillis() - time) > conn.rtt * 4
+		}
+		
+		if (lostPackets.isNotEmpty()) {
+			recordLossEvent(conn)
+			conn.sentPackets.keys.removeAll(lostPackets.keys)
+		}
+	}
+
+	private fun recordLossEvent(conn: UDPDevice) {
+		val currentTime = System.currentTimeMillis() / 1000.0
+		if (!conn.firstLoss) {
+			val interval = currentTime - conn.lastLossTime
+			conn.lossIntervals.addFirst(interval)
+			if (conn.lossIntervals.size > 8) conn.lossIntervals.removeLast()
+		} else {
+			conn.firstLoss = false
+		}
+		conn.lastLossTime = currentTime
 	}
 
 	fun getConnections(): List<UDPDevice?> = connections

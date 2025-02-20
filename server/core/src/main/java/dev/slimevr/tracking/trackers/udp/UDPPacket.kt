@@ -80,10 +80,25 @@ sealed interface SensorSpecificPacket {
 sealed interface RotationPacket : SensorSpecificPacket {
 	var rotation: Quaternion
 }
+data class UDPPacket27Ack(
+    var sequenceNumber: Long = 0,
+    var timestamp: Long = 0
+) : UDPPacket(27) {
+    override fun readData(buf: ByteBuffer) {
+        sequenceNumber = buf.long
+        timestamp = buf.long
+    }
+
+    override fun writeData(buf: ByteBuffer) {
+        buf.putLong(sequenceNumber)
+        buf.putLong(timestamp)
+    }
+}
+
 
 data object UDPPacket0Heartbeat : UDPPacket(0)
 data object UDPPacket1Heartbeat : UDPPacket(1)
-data object UDPPacket5RequestTrackerData : UDPPacket(5) // as per implementation-based req
+//data object UDPPacket5RequestTrackerData : UDPPacket(5) // as per implementation-based req
 data class UDPPacket1Rotation(override var rotation: Quaternion = Quaternion.IDENTITY) :
 	UDPPacket(1),
 	RotationPacket {
